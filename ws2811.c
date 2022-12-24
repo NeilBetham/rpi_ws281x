@@ -61,16 +61,16 @@
 /* 4 colors (R, G, B + W), 8 bits per byte, 3 symbols per bit + 55uS low for reset signal */
 #define LED_COLOURS                              4
 #define LED_RESET_uS                             55
-#define LED_BIT_COUNT(leds, freq)                ((leds * LED_COLOURS * 8 * 3) + ((LED_RESET_uS * \
+#define LED_BIT_COUNT(leds, freq, color_chans)   ((leds * color_chans * 8 * 3) + ((LED_RESET_uS * \
                                                   (freq * 3)) / 1000000))
 
 /* Minimum time to wait for reset to occur in microseconds. */
 #define LED_RESET_WAIT_TIME                      300
 
 // Pad out to the nearest uint32 + 32-bits for idle low/high times the number of channels
-#define PWM_BYTE_COUNT(leds, freq)               (((((LED_BIT_COUNT(leds, freq) >> 3) & ~0x7) + 4) + 4) * \
+#define PWM_BYTE_COUNT(leds, freq, color_chans)  (((((LED_BIT_COUNT(leds, freq, color_chans) >> 3) & ~0x7) + 4) + 4) * \
                                                   RPI_PWM_CHANNELS)
-#define PCM_BYTE_COUNT(leds, freq)               ((((LED_BIT_COUNT(leds, freq) >> 3) & ~0x7) + 4) + 4)
+#define PCM_BYTE_COUNT(leds, freq, color_chans)  ((((LED_BIT_COUNT(leds, freq, color_chans) >> 3) & ~0x7) + 4) + 4)
 
 // Symbol definitions
 #define SYMBOL_HIGH                              0x6  // 1 1 0
@@ -113,6 +113,7 @@ typedef struct ws2811_device
     volatile cm_clk_t *cm_clk;
     videocore_mbox_t mbox;
     int max_count;
+    int max_color_channels;
 } ws2811_device_t;
 
 /**
@@ -147,6 +148,28 @@ static int max_channel_led_count(ws2811_t *ws2811)
         if (ws2811->channel[chan].count > max)
         {
             max = ws2811->channel[chan].count;
+        }
+    }
+
+    return max;
+}
+
+/**
+ * Iterate through the channels and find the largest color channel count.
+ *
+ * @param    ws2811  ws2811 instance pointer.
+ *
+ * @returns  Maximum number of color channels.
+ */
+static int max_color_channels(ws2811_t *ws2811)
+{
+    int chan, max = 0;
+
+    for (chan = 0; chan < RPI_PWM_CHANNELS; chan++)
+    {
+        if (ws2811->channel[chan].color_channels > max)
+        {
+            max = ws2811->channel[chan].color_channels;
         }
     }
 
@@ -392,7 +415,7 @@ static int setup_pwm(ws2811_t *ws2811)
     pwm->ctl |= RPI_PWM_CTL_PWEN1 | RPI_PWM_CTL_PWEN2;
 
     // Initialize the DMA control block
-    byte_count = PWM_BYTE_COUNT(maxcount, freq);
+    byte_count = PWM_BYTE_COUNT(maxcount, freq, device->max_color_channels);
     dma_cb->ti = RPI_DMA_TI_NO_WIDE_BURSTS |  // 32-bit transfers
                  RPI_DMA_TI_WAIT_RESP |       // wait for write complete
                  RPI_DMA_TI_DEST_DREQ |       // user peripheral flow control
@@ -466,7 +489,7 @@ static int setup_pcm(ws2811_t *ws2811)
     pcm->dreq = (RPI_PCM_DREQ_TX(0x3F) | RPI_PCM_DREQ_TX_PANIC(0x10)); // Set FIFO tresholds
 
     // Initialize the DMA control block
-    byte_count = PCM_BYTE_COUNT(maxcount, freq);
+    byte_count = PCM_BYTE_COUNT(maxcount, freq, device->max_color_channels);
     dma_cb->ti = RPI_DMA_TI_NO_WIDE_BURSTS |  // 32-bit transfers
                  RPI_DMA_TI_WAIT_RESP |       // wait for write complete
                  RPI_DMA_TI_DEST_DREQ |       // user peripheral flow control
@@ -575,7 +598,7 @@ void pwm_raw_init(ws2811_t *ws2811)
 {
     volatile uint32_t *pxl_raw = (uint32_t *)ws2811->device->pxl_raw;
     int maxcount = ws2811->device->max_count;
-    int wordcount = (PWM_BYTE_COUNT(maxcount, ws2811->freq) / sizeof(uint32_t)) /
+    int wordcount = (PWM_BYTE_COUNT(maxcount, ws2811->freq, ws2811->device->max_color_channels) / sizeof(uint32_t)) /
                     RPI_PWM_CHANNELS;
     int chan;
 
@@ -603,7 +626,7 @@ void pcm_raw_init(ws2811_t *ws2811)
 {
     volatile uint32_t *pxl_raw = (uint32_t *)ws2811->device->pxl_raw;
     int maxcount = ws2811->device->max_count;
-    int wordcount = PCM_BYTE_COUNT(maxcount, ws2811->freq) / sizeof(uint32_t);
+    int wordcount = PCM_BYTE_COUNT(maxcount, ws2811->freq, ws2811->device->max_color_channels) / sizeof(uint32_t);
     int i;
 
     for (i = 0; i < wordcount; i++)
@@ -845,7 +868,7 @@ static ws2811_return_t spi_init(ws2811_t *ws2811)
     channel->bshift = (channel->strip_type >> 0)  & 0xff;
 
     // Allocate SPI transmit buffer (same size as PCM)
-    device->pxl_raw = malloc(PCM_BYTE_COUNT(device->max_count, ws2811->freq));
+    device->pxl_raw = malloc(PCM_BYTE_COUNT(device->max_count, ws2811->freq, device->max_color_channels));
     if (device->pxl_raw == NULL)
     {
         ws2811_cleanup(ws2811);
@@ -864,7 +887,7 @@ static ws2811_return_t spi_transfer(ws2811_t *ws2811)
     memset(&tr, 0, sizeof(struct spi_ioc_transfer));
     tr.tx_buf = (unsigned long)ws2811->device->pxl_raw;
     tr.rx_buf = 0;
-    tr.len = PCM_BYTE_COUNT(ws2811->device->max_count, ws2811->freq);
+    tr.len = PCM_BYTE_COUNT(ws2811->device->max_count, ws2811->freq, ws2811->device->max_color_channels);
 
     ret = ioctl(ws2811->device->spi_fd, SPI_IOC_MESSAGE(1), &tr);
     if (ret < 1)
@@ -923,15 +946,26 @@ ws2811_return_t ws2811_init(ws2811_t *ws2811)
         return spi_init(ws2811);
     }
 
+    // Determine the number of color channels there are for each channel
+    for(int index = 0; index < RPI_PWM_CHANNELS; index++) {
+      if(ws2811->channel[index].strip_type & SK6812_SHIFT_WMASK) {
+        ws2811->channel[index].color_channels = 4;
+      } else {
+        ws2811->channel[index].color_channels = 3;
+      }
+    }
+
+    device->max_color_channels = max_color_channels(ws2811);
+
     // Determine how much physical memory we need for DMA
     switch (device->driver_mode) {
     case PWM:
-        device->mbox.size = PWM_BYTE_COUNT(device->max_count, ws2811->freq) +
+        device->mbox.size = PWM_BYTE_COUNT(device->max_count, ws2811->freq, device->max_color_channels) +
                             sizeof(dma_cb_t);
         break;
 
     case PCM:
-        device->mbox.size = PCM_BYTE_COUNT(device->max_count, ws2811->freq) +
+        device->mbox.size = PCM_BYTE_COUNT(device->max_count, ws2811->freq, device->max_color_channels) +
                             sizeof(dma_cb_t);
         break;
     }
@@ -1155,13 +1189,7 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
         int wordpos = chan; // PWM & PCM
         int bytepos = 0;    // SPI
         const int scale = (channel->brightness & 0xff) + 1;
-        uint8_t array_size = 3; // Assume 3 color LEDs, RGB
-
-        // If our shift mask includes the highest nibble, then we have 4 LEDs, RBGW.
-        if (channel->strip_type & SK6812_SHIFT_WMASK)
-        {
-            array_size = 4;
-        }
+        uint8_t array_size = channel->color_channels;
 
         // 1.25µs per bit
         const uint32_t channel_protocol_time = channel->count * array_size * 8 * 1.25;
@@ -1170,6 +1198,12 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
         if (channel_protocol_time > protocol_time)
         {
             protocol_time = channel_protocol_time;
+        }
+
+        // Wait for any previous DMA operation to complete.
+        if ((ret = ws2811_wait(ws2811)) != WS2811_SUCCESS)
+        {
+            return ret;
         }
 
         for (i = 0; i < channel->count; i++)                // Led
@@ -1237,12 +1271,6 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
                 }
             }
         }
-    }
-
-    // Wait for any previous DMA operation to complete.
-    if ((ret = ws2811_wait(ws2811)) != WS2811_SUCCESS)
-    {
-        return ret;
     }
 
     if (ws2811->render_wait_time != 0) {

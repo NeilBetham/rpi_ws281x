@@ -74,6 +74,7 @@ typedef struct ws2811_channel_t
     int invert;                                  //< Invert output signal
     int count;                                   //< Number of LEDs, 0 if channel is unused
     int strip_type;                              //< Strip color layout -- one of WS2811_STRIP_xxx constants
+    int color_channels;                          //< The number of color channels per LED
     ws2811_led_t *leds;                          //< LED buffers, allocated by driver based on count
     uint8_t brightness;                          //< Brightness value between 0 and 255
     uint8_t wshift;                              //< White shift value
